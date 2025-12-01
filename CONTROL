@@ -1,0 +1,128 @@
+/*
+   Práctica: Monitoreo Multipunto con DS18B20 y BLE
+   Instituto: TUVN - Automatización e Instrumentación
+   Docente: Carlos Ruiz
+   Descripción: Lee 4 sensores en el mismo bus y envía datos vía BLE en formato JSON.
+*/
+
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// --- CONFIGURACIÓN DE HARDWARE ---
+#define ONE_WIRE_BUS 15  // Pin D15 donde se conectan los datos de los sensores
+
+// Instancias para OneWire
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// --- CONFIGURACIÓN BLE ---
+BLEServer* pServer = NULL;
+BLECharacteristic* pCharacteristic = NULL;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+
+// UUIDs para el servicio (puedes generar los tuyos en uuidgenerator.net)
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+// Clase para manejar la conexión del servidor
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+    }
+};
+
+void setup() {
+  Serial.begin(115200);
+
+  // Iniciar sensores
+  sensors.begin();
+  
+  // Imprimir cuántos sensores se detectaron
+  Serial.print("Sensores encontrados: ");
+  Serial.println(sensors.getDeviceCount());
+
+  // Iniciar BLE
+  BLEDevice::init("TUVN_Termometros"); // Nombre visible en Bluetooth
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_READ   |
+                      BLECharacteristic::PROPERTY_WRITE  |
+                      BLECharacteristic::PROPERTY_NOTIFY |
+                      BLECharacteristic::PROPERTY_INDICATE
+                    );
+
+  pCharacteristic->addDescriptor(new BLE2902());
+
+  pService->start();
+
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(false);
+  pAdvertising->setMinPreferred(0x0);
+  BLEDevice::startAdvertising();
+  Serial.println("Esperando conexión Bluetooth...");
+}
+
+void loop() {
+  // Si hay un dispositivo conectado, leemos y enviamos
+  if (deviceConnected) {
+    // 1. Solicitar temperaturas a todos los sensores en el bus
+    sensors.requestTemperatures(); 
+
+    // 2. Leer cada sensor por su índice (0 a 3)
+    // Nota: El orden (0,1,2,3) depende del ID único de fábrica de cada sensor, 
+    // no de cómo los conectaste físicamente.
+    float t1 = sensors.getTempCByIndex(0);
+    float t2 = sensors.getTempCByIndex(1);
+    float t3 = sensors.getTempCByIndex(2);
+    float t4 = sensors.getTempCByIndex(3);
+
+    // Validación simple: si el sensor no está, devuelve -127
+    if(t1 == -127) t1 = 0.0;
+    if(t2 == -127) t2 = 0.0;
+    if(t3 == -127) t3 = 0.0;
+    if(t4 == -127) t4 = 0.0;
+
+    // 3. Crear cadena JSON: {"s1":22.5,"s2":24.1,"s3":23.0,"s4":22.8}
+    String jsonString = "{";
+    jsonString += "\"s1\":" + String(t1, 1) + ",";
+    jsonString += "\"s2\":" + String(t2, 1) + ",";
+    jsonString += "\"s3\":" + String(t3, 1) + ",";
+    jsonString += "\"s4\":" + String(t4, 1);
+    jsonString += "}";
+
+    // 4. Enviar datos
+    pCharacteristic->setValue((char*)jsonString.c_str());
+    pCharacteristic->notify();
+    
+    Serial.println("Enviado: " + jsonString);
+    
+    // Esperar 2 segundos antes de la siguiente lectura para no saturar
+    delay(2000);
+  }
+
+  // Lógica de reconexión automática
+  if (!deviceConnected && oldDeviceConnected) {
+      delay(500); 
+      pServer->startAdvertising(); 
+      Serial.println("Reiniciando publicidad...");
+      oldDeviceConnected = deviceConnected;
+  }
+  if (deviceConnected && !oldDeviceConnected) {
+      oldDeviceConnected = deviceConnected;
+  }
+}
